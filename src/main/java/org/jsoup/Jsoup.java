@@ -5,6 +5,7 @@ import org.jsoup.helper.HttpConnection;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Entities;
 import org.jsoup.parser.ParseSettings;
+import org.jsoup.nodes.Element;
 import org.jsoup.parser.Parser;
 import org.jsoup.safety.Cleaner;
 import org.jsoup.safety.Safelist;
@@ -98,19 +99,19 @@ public class Jsoup {
     /**
      Creates a new {@link Connection} to use as a session. Connection settings (user-agent, timeouts, URL, etc), and
      cookies will be maintained for the session. Use examples:
-<pre><code>
-Connection session = Jsoup.newSession()
+     <pre><code>
+     Connection session = Jsoup.newSession()
      .timeout(20 * 1000)
      .userAgent("FooBar 2000");
 
-Document doc1 = session.newRequest()
+     Document doc1 = session.newRequest()
      .url("https://jsoup.org/").data("ref", "example")
      .get();
-Document doc2 = session.newRequest()
+     Document doc2 = session.newRequest()
      .url("https://en.wikipedia.org/wiki/Main_Page")
      .get();
-Connection con3 = session.newRequest();
-</code></pre>
+     Connection con3 = session.newRequest();
+     </code></pre>
 
      <p>For multi-threaded requests, it is safe to use this session between threads, but take care to call {@link
     Connection#newRequest()} per request and not share that instance between threads when executing or parsing.</p>
@@ -186,7 +187,7 @@ Connection con3 = session.newRequest();
         return DataUtil.load(file, charsetName, baseUri, parser);
     }
 
-     /**
+    /**
      Read an input stream, and parse it to a Document.
 
      @param in          input stream to read. The stream will be closed after reading.
@@ -292,7 +293,7 @@ Connection con3 = session.newRequest();
      @see Cleaner#clean(Document)
      */
     public static String clean(String bodyHtml, String baseUri, Safelist safelist) {
-       return clean(bodyHtml, baseUri, safelist, false);
+        return clean(bodyHtml, baseUri, safelist, new Cleaner.CleanerSettings().baseUri(baseUri));
     }
 
     /**
@@ -308,7 +309,7 @@ Connection con3 = session.newRequest();
      @see Cleaner#clean(Document)
      */
     public static String clean(String bodyHtml, String baseUri, Safelist safelist, Document.OutputSettings outputSettings) {
-        return clean(bodyHtml, baseUri, safelist, outputSettings, false);
+        return clean(bodyHtml, baseUri, safelist, outputSettings, new Cleaner.CleanerSettings().baseUri(baseUri));
     }
 
     /**
@@ -318,13 +319,13 @@ Connection con3 = session.newRequest();
      @param bodyHtml  input untrusted HTML (body fragment)
      @param baseUri   URL to resolve relative URLs against
      @param safelist  list of permitted HTML elements
-     @param cleanAttributeValues  if true, clean attribute values
+     @param cleanerSettings control how cleaner cleans
      @return safe HTML (body fragment)
 
      @see Cleaner#clean(Document)
      */
-    public static String clean(String bodyHtml, String baseUri, Safelist safelist, boolean cleanAttributeValues) {
-        return clean(bodyHtml, baseUri, safelist, null, cleanAttributeValues);
+    public static String clean(String bodyHtml, String baseUri, Safelist safelist, Cleaner.CleanerSettings cleanerSettings) {
+        return clean(bodyHtml, baseUri, safelist, new Document.OutputSettings(), cleanerSettings);
     }
 
     /**
@@ -336,13 +337,29 @@ Connection con3 = session.newRequest();
      the {@link Jsoup#clean(String html, String baseHref, Safelist)} method instead, and enable
      {@link Safelist#preserveRelativeLinks(boolean)}.</p>
 
+     <p>Note that the output of this method is still <b>HTML</b> even when using the TextNode only
+     {@link Safelist#none()}, and so any HTML entities in the output will be appropriately escaped.
+     If you want plain text, not HTML, you should use a text method such as {@link Element#text()} instead, after
+     cleaning the document.</p>
+     <p>Example:</p>
+     <pre>{@code
+     String sourceBodyHtml = "<p>5 is &lt; 6.</p>";
+     String html = Jsoup.clean(sourceBodyHtml, Safelist.none());
+
+     Cleaner cleaner = new Cleaner(Safelist.none());
+     String text = cleaner.clean(Jsoup.parse(sourceBodyHtml)).text();
+
+     // html is: 5 is &lt; 6.
+     // text is: 5 is < 6.
+     }</pre>
+
      @param bodyHtml input untrusted HTML (body fragment)
      @param safelist list of permitted HTML elements
      @return safe HTML (body fragment)
      @see Cleaner#clean(Document)
      */
     public static String clean(String bodyHtml, Safelist safelist) {
-        return clean(bodyHtml, "", safelist, false);
+        return clean(bodyHtml, "", safelist, new Cleaner.CleanerSettings());
     }
 
     /**
@@ -356,16 +373,16 @@ Connection con3 = session.newRequest();
      * @param baseUri URL to resolve relative URLs against
      * @param safelist list of permitted HTML elements
      * @param outputSettings document output settings; use to control pretty-printing and entity escape modes
-     * @param cleanAttributeValues  if true, clean attribute values
+     * @param cleanerSettings  control how cleaner cleans
      * @return safe HTML (body fragment)
      * @see Cleaner#clean(Document)
      */
-    public static String clean(String bodyHtml, String baseUri, Safelist safelist, Document.OutputSettings outputSettings, boolean cleanAttributeValues) {
+    public static String clean(String bodyHtml, String baseUri, Safelist safelist, Document.OutputSettings outputSettings, Cleaner.CleanerSettings cleanerSettings) {
         Document dirty = parseBodyFragment(
                 bodyHtml,
                 baseUri,
-                outputSettings != null && outputSettings.escapeMode().equals(Entities.EscapeMode.none) ? ParseSettings.preserveEntities : null);
-        Cleaner cleaner = new Cleaner(safelist, cleanAttributeValues);
+                outputSettings.escapeMode().equals(Entities.EscapeMode.none) ? ParseSettings.preserveEntities : null);
+        Cleaner cleaner = new Cleaner(safelist, cleanerSettings);
         Document clean = cleaner.clean(dirty);
         clean.outputSettings(outputSettings);
         return clean.body().html();
@@ -373,7 +390,19 @@ Connection con3 = session.newRequest();
 
     /**
      Test if the input body HTML has only tags and attributes allowed by the Safelist. Useful for form validation.
-     <p>The input HTML should still be run through the cleaner to set up enforced attributes, and to tidy the output.
+     <p>
+     This method is intended to be used in a user interface as a validator for user input. Note that regardless of the
+     output of this method, the input document <b>must always</b> be normalized using a method such as
+     {@link #clean(String, String, Safelist)}, and the result of that method used to store or serialize the document
+     before later reuse such as presentation to end users. This ensures that enforced attributes are set correctly, and
+     that any differences between how a given browser and how jsoup parses the input HTML are normalized.
+     </p>
+     <p>Example:</p>
+     <pre>{@code
+     Safelist safelist = Safelist.relaxed();
+     boolean isValid = Jsoup.isValid(sourceBodyHtml, safelist);
+     String normalizedHtml = Jsoup.clean(sourceBodyHtml, "https://example.com/", safelist);
+     }</pre>
      <p>Assumes the HTML is a body fragment (i.e. will be used in an existing HTML document body.)
      @param bodyHtml HTML to test
      @param safelist safelist to test against

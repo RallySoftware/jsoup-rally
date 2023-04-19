@@ -1,6 +1,5 @@
 package org.jsoup.safety;
 
-import org.jsoup.Jsoup;
 import org.jsoup.helper.Validate;
 import org.jsoup.nodes.Attribute;
 import org.jsoup.nodes.Attributes;
@@ -12,10 +11,10 @@ import org.jsoup.nodes.TextNode;
 import org.jsoup.parser.ParseErrorList;
 import org.jsoup.parser.Parser;
 import org.jsoup.parser.Tag;
+import org.jsoup.select.Elements;
 import org.jsoup.select.NodeTraversor;
 import org.jsoup.select.NodeVisitor;
 
-import javax.print.Doc;
 import java.util.List;
 
 
@@ -36,25 +35,25 @@ import java.util.List;
  */
 public class Cleaner {
     private final Safelist safelist;
-    private final boolean cleanAttributeValues;
+    private final Cleaner.CleanerSettings cleanerSettings;
 
     /**
      Create a new cleaner, that sanitizes documents using the supplied safelist.
      @param safelist safe-list to clean with
      */
     public Cleaner(Safelist safelist) {
-        this(safelist, false);
+        this(safelist, new CleanerSettings().cleanAttributeValues(false));
     }
 
     /**
      Create a new cleaner, that sanitizes documents using the supplied safelist.
      @param safelist safe-list to clean with
-     @param cleanAttributeValues if true, clean attribute values
+     @param cleanerSettings control how cleaner cleans
      */
-    public Cleaner(Safelist safelist, boolean cleanAttributeValues) {
+    public Cleaner(Safelist safelist, Cleaner.CleanerSettings cleanerSettings) {
         Validate.notNull(safelist);
         this.safelist = safelist;
-        this.cleanAttributeValues = cleanAttributeValues;
+        this.cleanerSettings = cleanerSettings;
     }
 
     /**
@@ -75,12 +74,23 @@ public class Cleaner {
     }
 
     /**
-     Determines if the input document <b>body</b>is valid, against the safelist. It is considered valid if all the tags and attributes
-     in the input HTML are allowed by the safelist, and that there is no content in the <code>head</code>.
+     Determines if the input document's <b>body</b> is valid, against the safelist. It is considered valid if all the
+     tags and attributes in the input HTML are allowed by the safelist, and that there is no content in the
+     <code>head</code>.
      <p>
-     This method can be used as a validator for user input. An invalid document will still be cleaned successfully
-     using the {@link #clean(Document)} document. If using as a validator, it is recommended to still clean the document
-     to ensure enforced attributes are set correctly, and that the output is tidied.
+     This method is intended to be used in a user interface as a validator for user input. Note that regardless of the
+     output of this method, the input document <b>must always</b> be normalized using a method such as
+     {@link #clean(Document)}, and the result of that method used to store or serialize the document before later reuse
+     such as presentation to end users. This ensures that enforced attributes are set correctly, and that any
+     differences between how a given browser and how jsoup parses the input HTML are normalized.
+     </p>
+     <p>Example:
+     <pre>{@code
+     Document inputDoc = Jsoup.parse(inputHtml);
+     Cleaner cleaner = new Cleaner(Safelist.relaxed());
+     boolean isValid = cleaner.isValid(inputDoc);
+     Document normalizedDoc = cleaner.clean(inputDoc);
+     }</pre>
      </p>
      @param dirtyDocument document to test
      @return true if no tags or attributes need to be removed; false if they do
@@ -94,6 +104,27 @@ public class Cleaner {
             && dirtyDocument.head().childNodes().isEmpty(); // because we only look at the body, but we start from a shell, make sure there's nothing in the head
     }
 
+    /**
+     Determines if the input document's <b>body HTML</b> is valid, against the safelist. It is considered valid if all
+     the tags and attributes in the input HTML are allowed by the safelist.
+     <p>
+     This method is intended to be used in a user interface as a validator for user input. Note that regardless of the
+     output of this method, the input document <b>must always</b> be normalized using a method such as
+     {@link #clean(Document)}, and the result of that method used to store or serialize the document before later reuse
+     such as presentation to end users. This ensures that enforced attributes are set correctly, and that any
+     differences between how a given browser and how jsoup parses the input HTML are normalized.
+     </p>
+     <p>Example:
+     <pre>{@code
+     Document inputDoc = Jsoup.parse(inputHtml);
+     Cleaner cleaner = new Cleaner(Safelist.relaxed());
+     boolean isValid = cleaner.isValidBodyHtml(inputHtml);
+     Document normalizedDoc = cleaner.clean(inputDoc);
+     }</pre>
+     </p>
+     @param bodyHtml HTML fragment to test
+     @return true if no tags or attributes need to be removed; false if they do
+     */
     public boolean isValidBodyHtml(String bodyHtml) {
         Document clean = Document.createShell("");
         Document dirty = Document.createShell("");
@@ -136,9 +167,9 @@ public class Cleaner {
                 TextNode destText = new TextNode(sourceText.getWholeText());
                 destination.appendChild(destText);
             } else if (source instanceof DataNode && safelist.isSafeTag(source.parent().nodeName())) {
-              DataNode sourceData = (DataNode) source;
-              DataNode destData = new DataNode(sourceData.getWholeData());
-              destination.appendChild(destData);
+                DataNode sourceData = (DataNode) source;
+                DataNode destData = new DataNode(sourceData.getWholeData());
+                destination.appendChild(destData);
             } else { // else, we don't care about comments, xml proc instructions, etc
                 numDiscarded++;
             }
@@ -169,8 +200,9 @@ public class Cleaner {
                 sourceAttr.setValue(cleanAttributeValue(sourceAttr));
                 destAttrs.put(sourceAttr);
             }
-            else
+            else {
                 numDiscarded++;
+            }
         }
         Attributes enforcedAttrs = safelist.getEnforcedAttributes(sourceTag);
         destAttrs.addAll(enforcedAttrs);
@@ -186,14 +218,32 @@ public class Cleaner {
     }
 
     private String cleanAttributeValue(Attribute attr) {
-        if (!cleanAttributeValues) {
+        if (!cleanerSettings.cleanAttributeValues()) {
             return attr.getValue();
         }
-        Document docFromAttribute = Document.createShell("http://bogus.com");
-        docFromAttribute.body().attributes().add(attr.getKey(), attr.getValue());
-//        Document docFromAttribute = this.clean(Jsoup.parse(attr.getValue()));
-        Document cleaned = this.clean(docFromAttribute);
-        return cleaned.body().text();
+        return getCleanedAttributeValue(attr);
+    }
+
+    private String getCleanedAttributeValue(Attribute attr) {
+        Document dirty = Parser.htmlParser().parseInput(attr.getValue(), cleanerSettings.baseUri());
+        Elements headChildren = dirty.head().children();
+        Elements bodyChildren = dirty.body().children();
+        if (headChildren.size() == 0 && bodyChildren.size() == 0) {
+            return attr.getValue();
+        }
+
+        Document cleaned = this.clean(dirty);
+        Elements cleanedHeadChildren = cleaned.head().children();
+        Elements cleanedBodyChildren = cleaned.body().children();
+        if (headChildren.size() > 0 && cleanedHeadChildren.size() == 0) {
+            return attr.getValue().replace(headChildren.outerHtml(), "");
+        }
+        if (bodyChildren.size() > 0 && cleanedBodyChildren.size() == 0) {
+            return attr.getValue().replace(bodyChildren.outerHtml(), "");
+        }
+        return headChildren.size() > 0
+                ? headChildren.outerHtml()
+                : bodyChildren.outerHtml();
     }
 
     private static class ElementMeta {
@@ -206,4 +256,61 @@ public class Cleaner {
         }
     }
 
+    /**
+     * A Cleaner's settings control how it cleans.
+     */
+    public static class CleanerSettings implements Cloneable {
+
+        private boolean cleanAttributeValues = false;
+        private String baseUri = "";
+
+        public CleanerSettings() {}
+
+        /**
+         * Get if clean attribute values is enabled. Default is false.
+         * @return if clean attribute values is enabled.
+         */
+        public boolean cleanAttributeValues() {
+            return cleanAttributeValues;
+        }
+
+        /**
+         * Enable or disable clean attribute values.
+         * @param clean new clean attribute values setting
+         * @return this, for chaining
+         */
+        public Cleaner.CleanerSettings cleanAttributeValues(boolean clean) {
+            this.cleanAttributeValues = clean;
+            return this;
+        }
+
+        /**
+         * Get base Uri for the cleaner. Default is empty string.
+         * @return the base Uri
+         */
+        public String baseUri() {
+            return this.baseUri == null || this.baseUri.trim().length() == 0 ?  "" : this.baseUri;
+        }
+
+        /**
+         * Set a base Uri for the cleaner.
+         * @param baseUri the new base Uri
+         * @return this, for chaining
+         */
+        public Cleaner.CleanerSettings baseUri(String baseUri) {
+            this.baseUri = baseUri;
+            return this;
+        }
+
+        @Override
+        public Cleaner.CleanerSettings clone() {
+            Cleaner.CleanerSettings clone;
+            try {
+                clone = (Cleaner.CleanerSettings) super.clone();
+            } catch (CloneNotSupportedException e) {
+                throw new RuntimeException(e);
+            }
+            return clone;
+        }
+    }
 }
